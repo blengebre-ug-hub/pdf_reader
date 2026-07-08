@@ -1,0 +1,40 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.log
+
+# ── Virtual envs / IDE ──────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+
+# ── Downloaded PDFs (GB of data — keep local only) ───────
+justice_regulation_downloader/pdfs/*
+!justice_regulation_downloader/pdfs/.gitkeep
+
+# ── SQLite / local databases (recreated on each machine) ─
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+
+# ── Debug / temp / scraped HTML snapshots ────────────────
+justice_regulation_downloader/page.html
+justice_regulation_downloader/playwright_page.html
+justice_regulation_downloader/tmp_run_check/
+justice_regulation_downloader/downloads/
+justice_regulation_downloader/__pycache__/
+
+# ── Unrelated local files (not part of downloader) ───────
+*.xlsx
+*.pdf
+!justice_regulation_downloader/test_pdf_placeholder.pdf
+final.py
+new.py
+
+# ── Nested git repos (accidental) ────────────────────────
+justice_regulation_downloader/.git/

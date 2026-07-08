@@ -1,0 +1,1 @@
+"""Justice regulation downloader package."""

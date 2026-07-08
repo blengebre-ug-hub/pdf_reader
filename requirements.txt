@@ -1,0 +1,11 @@
+pandas
+openpyxl
+pdf2image
+dashscope
+openai
+aiohttp
+aiosqlite
+beautifulsoup4
+pypdf
+redis
+rq
