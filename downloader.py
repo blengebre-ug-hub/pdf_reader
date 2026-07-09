@@ -25,8 +25,8 @@ except ImportError:  # pragma: no cover - exercised when optional deps are missi
     Redis = None
     Queue = None
 
-BASE_URL = "https://justice.gov.et"
-REGULATION_URL = "https://justice.gov.et/en/laws/regulations/"
+BASE_URL = "http://justice.gov.et"
+REGULATION_URL = "http://justice.gov.et/en/laws/regulations/"
 DEFAULT_MIN_YEAR = 1987
 DEFAULT_MAX_YEAR = datetime.now().year
 DOWNLOAD_FOLDER = Path(__file__).resolve().parent / "pdfs"
@@ -51,7 +51,10 @@ def normalize_url(url: str) -> str | None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
-    return parsed.geturl()
+    normalized = parsed.geturl()
+    if "justice.gov.et" in normalized.lower():
+        normalized = normalized.replace("https://", "http://")
+    return normalized
 
 
 def sanitize_filename(text: str) -> str:
@@ -111,6 +114,25 @@ def update_publication_metadata(conn: sqlite3.Connection, url: str, publication_
 def is_pdf_url(url: str) -> bool:
     lower = url.lower()
     return lower.endswith(".pdf") or "jet_download" in lower or "/download" in lower or "/downloadfile" in lower
+
+
+def is_crawlable_page(url: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    ignored_extensions = {
+        ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+        ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mp3", ".wav", ".zip",
+        ".tar", ".gz", ".rar", ".7z", ".doc", ".docx", ".xls", ".xlsx",
+        ".ppt", ".pptx", ".xml", ".json", ".txt"
+    }
+    ext = Path(path).suffix
+    if ext in ignored_extensions:
+        return False
+    # Avoid query strings with asset extensions
+    query = parsed.query.lower()
+    if any(ext in query for ext in ignored_extensions):
+        return False
+    return True
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:
@@ -415,7 +437,8 @@ def discover_sitemaps(base_url: str, conn: sqlite3.Connection, proxies: dict[str
             if loc.endswith(".xml"):
                 candidates.append(loc)
             else:
-                enqueue_url(conn, loc, "page", "sitemap")
+                if is_crawlable_page(loc):
+                    enqueue_url(conn, loc, "page", "sitemap")
 
 
 def discover_wordpress_api(base_url: str, conn: sqlite3.Connection, proxies: dict[str, str] | None = None) -> None:
@@ -441,7 +464,8 @@ def discover_wordpress_api(base_url: str, conn: sqlite3.Connection, proxies: dic
             for item in payload:
                 link = item.get("link") or item.get("url") or item.get("guid", {}).get("rendered")
                 if link:
-                    enqueue_url(conn, link, "page", "wordpress_api")
+                    if is_crawlable_page(link):
+                        enqueue_url(conn, link, "page", "wordpress_api")
             page += 1
             if not headers.get("x-wp-totalpages"):
                 break
@@ -457,9 +481,11 @@ def crawl_pages(conn: sqlite3.Connection, max_pages: int = 0, proxies: dict[str,
     processed = 0
 
     def crawl_worker(page_url: str) -> None:
+        print(f"[Crawl] Processing page: {page_url}")
         try:
             html, _ = fetch_text(page_url, proxies=proxies)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+            print(f"[Crawl] Failed: {page_url} - Error: {exc}")
             mark_discovered(conn, page_url, "failed", str(exc))
             return
 
@@ -467,12 +493,18 @@ def crawl_pages(conn: sqlite3.Connection, max_pages: int = 0, proxies: dict[str,
         if publication_date:
             update_publication_metadata(conn, page_url, publication_date)
 
+        pdf_count = 0
+        page_count = 0
         for link in extract_links_from_html(html, page_url):
             if is_pdf_url(link):
                 enqueue_url(conn, link, "pdf", "discovered_from_page")
+                pdf_count += 1
             elif urlparse(link).netloc == urlparse(page_url).netloc:
-                enqueue_url(conn, link, "page", "discovered_from_page", publication_date=publication_date)
+                if is_crawlable_page(link):
+                    enqueue_url(conn, link, "page", "discovered_from_page", publication_date=publication_date)
+                    page_count += 1
 
+        print(f"[Crawl] Done page: {page_url} (Found {pdf_count} PDFs, {page_count} Pages)")
         mark_discovered(conn, page_url, "done")
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
@@ -522,24 +554,29 @@ def download_pdfs(conn: sqlite3.Connection, output_dir: Path, workers: int = 20,
 
         output_path = output_dir / candidate_name
         if output_path.exists():
+            print(f"[Download] Skipped (already exists): {candidate_name}")
             save_download_record(conn, normalized, str(output_path), "skipped", output_path.stat().st_size, "application/pdf")
             return str(output_path), "skipped"
 
+        print(f"[Download] Fetching PDF: {normalized} -> {candidate_name}")
         try:
             body, headers = fetch_bytes(normalized, proxies=proxies)
             content_type = headers.get("content-type", "")
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+            print(f"[Download] Failed: {candidate_name} - Fetch error: {exc}")
             mark_discovered(conn, normalized, "failed", str(exc))
             save_download_record(conn, normalized, None, "failed", None, None, str(exc))
             return "", "failed"
 
         if not body or len(body) < 20:
+            print(f"[Download] Failed: {candidate_name} - Empty response")
             mark_discovered(conn, normalized, "failed", "empty response")
             save_download_record(conn, normalized, None, "failed", None, content_type, "empty response")
             return "", "failed"
 
         is_pdf_payload = body.startswith(b"%PDF") or "pdf" in content_type.lower() or normalized.lower().endswith(".pdf")
         if not is_pdf_payload:
+            print(f"[Download] Failed: {candidate_name} - Not a PDF (Type: {content_type})")
             mark_discovered(conn, normalized, "failed", "not a PDF response")
             save_download_record(conn, normalized, None, "failed", len(body), content_type, "not a PDF response")
             return "", "failed"
@@ -554,6 +591,7 @@ def download_pdfs(conn: sqlite3.Connection, output_dir: Path, workers: int = 20,
         status = "downloaded"
         if not text.strip():
             status = "downloaded_needs_ocr"
+        print(f"[Download] Success: {candidate_name} ({len(body)} bytes, status: {status})")
         save_download_record(conn, normalized, str(output_path), status, len(body), content_type)
         mark_discovered(conn, normalized, status)
         if status == "downloaded_needs_ocr":
