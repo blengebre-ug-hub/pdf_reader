@@ -41,6 +41,11 @@ HEADERS = {
     "Referer": BASE_URL + "/",
 }
 
+# Rate limiting: prevent server from banning IP due to rapid burst requests
+_RATE_LIMIT_LOCK = threading.Lock()
+_LAST_REQUEST_TIME: float = 0.0
+_REQUEST_DELAY: float = 6.0  # seconds between requests
+
 
 def normalize_url(url: str) -> str | None:
     parsed = urlparse(url)
@@ -284,6 +289,7 @@ def _curl_fetch(url: str, timeout: int, binary: bool, proxies: dict[str, str] | 
         "-A",
         HEADERS["User-Agent"],
         "-sS",
+        "--http1.1",
         url,
     ]
     result = subprocess.run(cmd, capture_output=True, check=False, env=env)
@@ -308,78 +314,63 @@ def build_url_opener(proxies: dict[str, str] | None = None) -> urllib.request.Op
 
 
 def fetch_text(url: str, timeout: int = 120, proxies: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
-    """Fetch text from URL with lenient SSL handling and extended timeout."""
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
+    """Fetch text using curl only with HTTP/1.1 and rate limiting.
 
-    request = urllib.request.Request(url, headers=HEADERS)
+    urllib is intentionally skipped: its TLS fingerprint is detected and
+    blocked by the target server.  curl --http1.1 with a spoofed Chrome
+    User-Agent is the only method confirmed to work.
+    """
+    global _LAST_REQUEST_TIME
+    with _RATE_LIMIT_LOCK:
+        elapsed = time.time() - _LAST_REQUEST_TIME
+        if elapsed < _REQUEST_DELAY:
+            time.sleep(_REQUEST_DELAY - elapsed)
+        _LAST_REQUEST_TIME = time.time()
+
     last_error: Exception | None = None
-    for active_proxies in (proxies, None):
-        for attempt in range(3):
-            opener = build_url_opener(active_proxies)
-            try:
-                with opener.open(request, timeout=timeout, context=ssl_context) as response:
-                    body = response.read().decode("utf-8", errors="ignore")
-                    headers = {key.lower(): value for key, value in response.headers.items()}
-                    return body, headers
-            except Exception as exc:
-                last_error = exc
-                if not _is_transient_fetch_error(exc) or attempt == 2:
-                    break
-                time.sleep(0.5 * (attempt + 1))
-
-    for active_proxies in (proxies, None):
-        for attempt in range(2):
-            try:
-                return _curl_fetch(url, timeout, binary=False, proxies=active_proxies)  # type: ignore[return-value]
-            except Exception as exc:
-                last_error = exc
-                if not _is_transient_fetch_error(exc) or attempt == 1:
-                    break
-                time.sleep(0.5 * (attempt + 1))
+    for attempt in range(3):
+        try:
+            body, headers = _curl_fetch(url, timeout, binary=False, proxies=proxies)  # type: ignore[assignment]
+            return body, headers  # type: ignore[return-value]
+        except Exception as exc:
+            last_error = exc
+            if not _is_transient_fetch_error(exc) or attempt == 2:
+                break
+            time.sleep(2.0 * (attempt + 1))
 
     if last_error is not None:
         raise last_error
-    raise urllib.error.URLError("fetch failed")
+    raise urllib.error.URLError("fetch_text failed")
 
 
 def fetch_bytes(url: str, timeout: int = 240, proxies: dict[str, str] | None = None) -> tuple[bytes, dict[str, str]]:
-    """Fetch binary data from URL with lenient SSL handling and extended timeout."""
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
+    """Fetch binary data using curl only with HTTP/1.1 and rate limiting.
 
-    request = urllib.request.Request(url, headers=HEADERS)
+    urllib is intentionally skipped: its TLS fingerprint is detected and
+    blocked by the target server.  curl --http1.1 with a spoofed Chrome
+    User-Agent is the only method confirmed to work.
+    """
+    global _LAST_REQUEST_TIME
+    with _RATE_LIMIT_LOCK:
+        elapsed = time.time() - _LAST_REQUEST_TIME
+        if elapsed < _REQUEST_DELAY:
+            time.sleep(_REQUEST_DELAY - elapsed)
+        _LAST_REQUEST_TIME = time.time()
+
     last_error: Exception | None = None
-    for active_proxies in (proxies, None):
-        for attempt in range(3):
-            opener = build_url_opener(active_proxies)
-            try:
-                with opener.open(request, timeout=timeout, context=ssl_context) as response:
-                    body = response.read()
-                    headers = {key.lower(): value for key, value in response.headers.items()}
-                    return body, headers
-            except Exception as exc:
-                last_error = exc
-                if not _is_transient_fetch_error(exc) or attempt == 2:
-                    break
-                time.sleep(0.5 * (attempt + 1))
-
-    for active_proxies in (proxies, None):
-        for attempt in range(2):
-            try:
-                body, _ = _curl_fetch(url, timeout, binary=True, proxies=active_proxies)  # type: ignore[return-value]
-                return body, {}
-            except Exception as exc:
-                last_error = exc
-                if not _is_transient_fetch_error(exc) or attempt == 1:
-                    break
-                time.sleep(0.5 * (attempt + 1))
+    for attempt in range(3):
+        try:
+            body, headers = _curl_fetch(url, timeout, binary=True, proxies=proxies)  # type: ignore[assignment]
+            return body, headers  # type: ignore[return-value]
+        except Exception as exc:
+            last_error = exc
+            if not _is_transient_fetch_error(exc) or attempt == 2:
+                break
+            time.sleep(2.0 * (attempt + 1))
 
     if last_error is not None:
         raise last_error
-    raise urllib.error.URLError("fetch failed")
+    raise urllib.error.URLError("fetch_bytes failed")
 
 
 def extract_links_from_html(html: str, page_url: str) -> list[str]:
